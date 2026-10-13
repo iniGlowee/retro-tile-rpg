@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>retro-tile-rpg — the look</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0b0e12; overflow: hidden; font: 13px/1.4 system-ui, sans-serif; color: #cdd6e0; }
+  #app { position: fixed; inset: 0; }
+  #hud { position: fixed; left: 12px; top: 12px; z-index: 10; background: rgba(0,0,0,.55); padding: 10px 12px; border-radius: 6px; max-width: 340px; }
+  #hud b { color: #ffd23b; } label { display: block; margin-top: 6px; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="hud">
+  <b>retro-tile-rpg</b> — HSL-Gouraud flat shading under one fixed key light, gamma 0.8,
+  distance fog. Low-poly, no specular, no shadows.
+  <label><input type="checkbox" id="fog" checked> distance fog</label>
+  <label><input type="checkbox" id="smooth"> smooth (Gouraud) instead of flat facets</label>
+  <div id="stat" style="margin-top:6px;color:#9fb"></div>
+</div>
+<script type="importmap">
+{ "imports": { "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.module.min.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { createRetroFlatMaterial, setFlatColor } from './retro-flat-material.js';
+
+const app = document.getElementById('app');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(2, devicePixelRatio));
+renderer.setSize(innerWidth, innerHeight);
+app.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const FOG_COLOR = 0x9fb0c3;
+scene.background = new THREE.Color(FOG_COLOR);
+
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 400);
+camera.position.set(0, 26, 42);
+camera.lookAt(0, 0, 0);
+
+// one shared material; fog uniforms updated below
+let material = createRetroFlatMaterial(THREE, { ambient: 0.45, diffuse: 0.55, gamma: 0.8, fog: true });
+function fogUniforms(mat) {
+  if (!mat.uniforms.fogColor) return;
+  mat.uniforms.fogColor.value.set(FOG_COLOR);
+  mat.uniforms.fogNear.value = 30;
+  mat.uniforms.fogFar.value = 110;
+}
+fogUniforms(material);
+
+const world = new THREE.Group(); scene.add(world);
+
+// --- procedural low-poly terrain (a rolling heightfield) ---
+const SIZE = 64, CELL = 1.4;
+function buildTerrain(smooth) {
+  const geo = new THREE.PlaneGeometry(SIZE * CELL, SIZE * CELL, SIZE, SIZE);
+  geo.rotateX(-Math.PI / 2);
+  const p = geo.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), z = p.getZ(i);
+    const h = Math.sin(x * 0.18) * 2.2 + Math.cos(z * 0.21) * 2.0 + Math.sin((x + z) * 0.08) * 1.4;
+    p.setY(i, h);
+  }
+  const g = smooth ? geo : geo.toNonIndexed();  // non-indexed = hard facets
+  g.computeVertexNormals();
+  // colour by height: low = sandy, mid = grass, high = rock (hue/sat per vertex)
+  setFlatColor(THREE, g,
+    (face, i) => { const y = g.attributes.position.getY(i); return y < -1 ? 0.12 : y < 2 ? 0.30 : 0.08; },
+    (face, i) => { const y = g.attributes.position.getY(i); return y < -1 ? 0.45 : y < 2 ? 0.55 : 0.18; });
+  return g;
+}
+let terrain = new THREE.Mesh(buildTerrain(false), material);
+world.add(terrain);
+
+// --- scattered low-poly "trees" (cone + trunk) to read the facets + fog ---
+const trees = new THREE.Group(); world.add(trees);
+function addTrees(smooth) {
+  trees.clear();
+  for (let n = 0; n < 40; n++) {
+    const x = (Math.random() - 0.5) * SIZE * CELL * 0.9;
+    const z = (Math.random() - 0.5) * SIZE * CELL * 0.9;
+    const h = Math.sin(x * 0.18) * 2.2 + Math.cos(z * 0.21) * 2.0 + Math.sin((x + z) * 0.08) * 1.4;
+    const cone = new THREE.ConeGeometry(1.1, 3, 6);
+    const g = (smooth ? cone : cone.toNonIndexed()); g.computeVertexNormals();
+    setFlatColor(THREE, g, 0.34, 0.6);
+    const m = new THREE.Mesh(g, material);
+    m.position.set(x, h + 2, z);
+    trees.add(m);
+  }
+}
+addTrees(false);
+
+scene.add(new THREE.AmbientLight(0xffffff, 1)); // unused by the shader; keeps three happy
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+function rebuild() {
+  const smooth = document.getElementById('smooth').checked;
+  const fog = document.getElementById('fog').checked;
+  material = createRetroFlatMaterial(THREE, { ambient: 0.45, diffuse: 0.55, gamma: 0.8, fog });
+  fogUniforms(material);
+  terrain.geometry.dispose(); terrain.geometry = buildTerrain(smooth); terrain.material = material;
+  addTrees(smooth);
+}
+document.getElementById('fog').onchange = rebuild;
+document.getElementById('smooth').onchange = rebuild;
+
+let last = performance.now(), frames = 0, acc = 0;
+function tick(now) {
+  const dt = (now - last) / 1000; last = now;
+  world.rotation.y += dt * 0.15;
+  renderer.render(scene, camera);
+  acc += dt; frames++;
+  if (acc >= 0.5) {
+    document.getElementById('stat').textContent =
+      `${renderer.info.render.triangles} tris · ${renderer.info.programs.length} program(s) · ${Math.round(frames / acc)} fps`;
+    window.__demo = { tris: renderer.info.render.triangles, programs: renderer.info.programs.length };
+    acc = 0; frames = 0;
+  }
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+window.__app = { THREE, scene, camera, renderer, material, get terrain(){return terrain;} };
+window.__ready = true;
+</script>
+</body>
+</html>
